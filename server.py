@@ -1,83 +1,111 @@
 import socket
 import threading
 import os
+from datetime import datetime
 
-HOST = "127.0.0.1"
-PORT = 5555
+class ChatServer:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.users_file = "server_storage/users.txt"
+        self.clients = {}  # username -> socket
 
-USERS_FILE = "server_storage/users.txt"
-clients = {}  # username -> socket
-
-
-def load_users():
-    if not os.path.exists(USERS_FILE):
-        return set()
-    with open(USERS_FILE, "r") as f:
-        return set(line.strip() for line in f)
-
-
-def save_user(username):
-    users = load_users()
-    if username not in users:
+        # Ensure storage folder exists
         os.makedirs("server_storage", exist_ok=True)
-        with open(USERS_FILE, "a") as f:
-            f.write(username + "\n")
 
+    # ---------- USER MANAGEMENT ----------
+    def load_users(self):
+        if not os.path.exists(self.users_file):
+            return set()
+        with open(self.users_file, "r") as f:
+            return set(line.strip() for line in f)
 
-def broadcast_users():
-    user_list = ",".join(clients.keys())
-    for sock in clients.values():
-        sock.send(f"USERS:{user_list}".encode())
+    def save_user(self, username):
+        users = self.load_users()
+        if username not in users:
+            with open(self.users_file, "a") as f:
+                f.write(username + "\n")
 
+    def broadcast_users(self):
+        user_list = ",".join(self.clients.keys())
+        for sock in self.clients.values():
+            try:
+                sock.send(f"USERS:{user_list}".encode())
+            except:
+                pass
 
-def handle_client(sock, username):
-    while True:
-        try:
-            data = sock.recv(4096)
-            if not data:
+    # ---------- CLIENT HANDLER ----------
+    def handle_client(self, sock, username):
+        while True:
+            try:
+                data = sock.recv(4096)
+                if not data:
+                    break
+
+                # Make sure the data has the separator
+                if b"|" not in data:
+                    continue
+
+                target, encrypted_msg = data.split(b"|", 1)
+                target = target.decode()
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # ----- STORE MESSAGE ENCRYPTED -----
+                log_file = f"server_storage/{target}_log.txt"
+                with open(log_file, "a") as f:
+                    f.write(f"[{timestamp}] {username} -> {target}: {encrypted_msg.decode()}\n")
+
+                # ----- FORWARD TO TARGET IF ONLINE -----
+                if target in self.clients:
+                    try:
+                        self.clients[target].send(username.encode() + b"|" + encrypted_msg)
+                    except:
+                        pass
+                else:
+                    sock.send(b"SERVER|User offline or not found")
+
+            except Exception as e:
+                print(f"[!] Error with {username}: {e}")
                 break
 
-            target, encrypted_msg = data.split(b"|", 1)
-            target = target.decode()
+        # Clean up on disconnect
+        sock.close()
+        if username in self.clients:
+            del self.clients[username]
+        self.broadcast_users()
+        print(f"[-] {username} disconnected")
 
-            if target in clients:
-                clients[target].send(username.encode() + b"|" + encrypted_msg)
-            else:
-                sock.send(b"SERVER|User offline or not found")
+    # ---------- SERVER START ----------
+    def start(self):
+        server = socket.socket()
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind((self.host, self.port))
+        server.listen()
 
-        except:
-            break
+        print("✅ Secure Message Chat System Server running")
 
-    sock.close()
-    del clients[username]
-    broadcast_users()
-    print(f"[-] {username} disconnected")
+        while True:
+            client_socket, _ = server.accept()
+            try:
+                username = client_socket.recv(1024).decode()
+            except:
+                client_socket.close()
+                continue
 
+            self.save_user(username)
+            self.clients[username] = client_socket
+            self.broadcast_users()
 
-def start():
-    server = socket.socket()
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((HOST, PORT))
-    server.listen()
+            print(f"[+] {username} connected")
 
-    print("✅ Secure Message Chat System Server running")
-
-    while True:
-        client_socket, _ = server.accept()
-        username = client_socket.recv(1024).decode()
-
-        save_user(username)
-        clients[username] = client_socket
-        broadcast_users()
-
-        print(f"[+] {username} connected")
-
-        threading.Thread(
-            target=handle_client,
-            args=(client_socket, username),
-            daemon=True
-        ).start()
+            threading.Thread(
+                target=self.handle_client,
+                args=(client_socket, username),
+                daemon=True
+            ).start()
 
 
 if __name__ == "__main__":
-    start()
+    server = ChatServer("127.0.0.1", 5555)
+    server.start()
